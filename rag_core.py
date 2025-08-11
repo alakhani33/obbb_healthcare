@@ -1,5 +1,19 @@
 import os
 from typing import List, Dict, Any
+
+# --- SQLite shim for Chroma on Streamlit Cloud ---
+# If the system sqlite3 is too old, use pysqlite3-binary.
+try:
+    import pysqlite3  # noqa: F401
+    import sys
+    sys.modules["sqlite3"] = sys.modules.pop("pysqlite3")
+except Exception:
+    pass
+
+import chromadb
+
+from chromadb.config import Settings
+
 import chromadb
 from chromadb.config import Settings
 from langchain.text_splitter import RecursiveCharacterTextSplitter

@@ -2,14 +2,18 @@
 streamlit>=1.32.0
 python-dotenv>=1.0.0
 
+# keep the rest of your deps...
+chromadb==0.5.5
+
+# Only install this on Linux (Streamlit Cloud); skip on Windows/macOS
+pysqlite3-binary>=0.5.3; platform_system == "Linux"
+
+
 # RAG core
 langchain>=0.2.11
 langchain-openai>=0.1.17
 openai>=1.30.0
-
-# Vector DB
-chromadb==0.5.5
-
+:
 # Retrieval helpers
 rank-bm25>=0.2.2
 tiktoken>=0.7.0
