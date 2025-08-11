@@ -10,6 +10,8 @@ openai>=1.30.0
 # Vector DB (Chroma)
 chromadb==0.5.5
 
+faiss-cpu>=1.7.4
+
 # Retrieval helpers
 rank-bm25>=0.2.2
 tiktoken>=0.7.0

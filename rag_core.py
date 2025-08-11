@@ -1,120 +1,121 @@
+# rag_core.py
 import os
 from typing import List, Dict, Any
 
-# --- SQLite shim for Chroma on Streamlit Cloud ---
-# If the system sqlite3 is too old, use pysqlite3-binary.
-try:
-    import pysqlite3  # noqa: F401
-    import sys
-    sys.modules["sqlite3"] = sys.modules.pop("pysqlite3")
-except Exception:
-    pass
+# --- Backend selector ---
+USE_FAISS = os.getenv("VECTOR_BACKEND", "chroma").lower() == "faiss"
 
-import chromadb
-
-from chromadb.config import Settings
-
-import chromadb
-from chromadb.config import Settings
-from langchain.text_splitter import RecursiveCharacterTextSplitter
-from rank_bm25 import BM25Okapi
-from uuid import uuid4
-# Choose embeddings/LLM
-from langchain_openai import OpenAIEmbeddings, ChatOpenAI
-
-# If you want Gemini later:
-# from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
+# Common: embeddings factory (LangChain OpenAI)
+from langchain_openai import OpenAIEmbeddings
 
 def get_embeddings():
-    # swap here for Gemini if desired:
-    # return GoogleGenerativeAIEmbeddings(model="models/text-embedding-004", google_api_key=os.getenv("GOOGLE_API_KEY"))
     return OpenAIEmbeddings(model=os.getenv("EMBEDDING_MODEL", "text-embedding-3-large"))
 
-def get_llm():
-    model = os.getenv("MODEL_CHOICE", "gpt-4o-mini")
-    # Gemini alternative:
-    # return ChatGoogleGenerativeAI(model="gemini-1.5-flash", google_api_key=os.getenv("GOOGLE_API_KEY"), convert_system_message_to_human=True)
-    return ChatOpenAI(model=model, temperature=0.1)
+# -----------------------------
+# FAISS backend (Cloud-friendly)
+# -----------------------------
+if USE_FAISS:
+    from langchain_community.vectorstores import FAISS
+
+    _faiss_store: FAISS | None = None
+
+    def init_chroma(persist_dir: str = "./chroma_db"):
+        # Keep signature for the app; FAISS doesn't need a client/collection
+        return None, None
+
+    def add_to_vectorstore(_coll, _embeddings, chunks: List[Dict[str, Any]]):
+        """Build or extend an in-memory FAISS index."""
+        global _faiss_store
+        texts = [c["text"] for c in chunks]
+        metas = [c["metadata"] for c in chunks]
+        embeddings = get_embeddings()
+        if _faiss_store is None:
+            _faiss_store = FAISS.from_texts(texts=texts, embedding=embeddings, metadatas=metas)
+        else:
+            _faiss_store.add_texts(texts=texts, metadatas=metas, embedding=embeddings)
+
+    def retrieve(_coll, _embeddings, query: str, k: int = 6):
+        if _faiss_store is None:
+            return []
+        docs = _faiss_store.similarity_search(query, k=k)
+        return [{"text": d.page_content, "metadata": d.metadata} for d in docs]
+
+# -----------------------------
+# Chroma backend (local dev)
+# -----------------------------
+else:
+    # SQLite shim for Cloud/Linux if present; harmless elsewhere
+    try:
+        import pysqlite3  # installed only on Linux (requirements has a platform marker)
+        import sys
+        sys.modules["sqlite3"] = sys.modules.pop("pysqlite3")
+    except Exception:
+        pass
+
+    import chromadb
+
+    def init_chroma(persist_dir: str = "./chroma_db"):
+        # Use 0.5.x PersistentClient API to avoid _type issues with Settings
+        try:
+            client = chromadb.PersistentClient(path=persist_dir)
+            coll = client.get_or_create_collection(
+                "big_bill_collection",
+                metadata={"hnsw:space": "cosine"},
+            )
+            return client, coll
+        except Exception as e:
+            raise RuntimeError(
+                "Vector store initialization failed (Chroma). "
+                "Make sure runtime.txt pins Python 3.11 and chromadb==0.5.5. "
+                f"Original error: {e}"
+            )
+
+    def add_to_vectorstore(coll, _embeddings, chunks: List[Dict[str, Any]]):
+        ids = [c["id"] for c in chunks]
+        texts = [c["text"] for c in chunks]
+        metadatas = [c["metadata"] for c in chunks]
+        coll.add(ids=ids, documents=texts, metadatas=metadatas)
+
+    def retrieve(coll, embeddings, query: str, k: int = 6):
+        # Simple similarity search
+        res = coll.query(query_texts=[query], n_results=k, include=["metadatas", "documents"])
+        docs = []
+        if res and res.get("documents"):
+            for text, meta in zip(res["documents"][0], res["metadatas"][0]):
+                docs.append({"text": text, "metadata": meta})
+        return docs
+
+# -----------------------------
+# Your existing helpers
+# -----------------------------
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from rank_bm25 import BM25Okapi
 
 def chunk_text(text: str, doc_title: str, source_path: str) -> List[Dict[str, Any]]:
-    splitter = RecursiveCharacterTextSplitter(
-        chunk_size=1800, chunk_overlap=200,
-        separators=["\n\n", "\n", "Section ", "Sec.", ".", " "]
-    )
+    splitter = RecursiveCharacterTextSplitter(chunk_size=1200, chunk_overlap=150)
     chunks = splitter.split_text(text)
     out = []
+    from uuid import uuid4
     for i, c in enumerate(chunks):
         out.append({
-            "id": f"{doc_title}-{i}-{uuid4().hex}",  # ensure unique IDs across pages/runs
+            "id": f"{doc_title}-{i}-{uuid4().hex}",
             "text": c,
-            "metadata": {
-                "doc_title": doc_title,
-                "source_path": source_path,
-            }
+            "metadata": {"doc_title": doc_title, "source_path": source_path},
         })
-
     return out
 
-# def init_chroma(persist_dir: str = "./chroma_db"):
-#     client = chromadb.Client(Settings(persist_directory=persist_dir, is_persistent=True))
-#     coll = client.get_or_create_collection("big_bill_collection", metadata={"hnsw:space": "cosine"})
-#     return client, coll
-
-# --- SQLite shim for Chroma on Streamlit Cloud (safe to keep everywhere) ---
-try:
-    import pysqlite3  # installed on Linux/Cloud only (requirements has a platform marker)
-    import sys
-    sys.modules["sqlite3"] = sys.modules.pop("pysqlite3")
-except Exception:
-    pass
-
-# ⬇️ Replace your old init_chroma with this:
-def init_chroma(persist_dir: str = "./chroma_db"):
-    try:
-        import chromadb
-        # Use the modern API to avoid the '_type' error
-        # Chroma 0.5.x: PersistentClient handles the sqlite/duckdb config internally
-        client = chromadb.PersistentClient(path=persist_dir)  # or persist_directory=...
-        coll = client.get_or_create_collection(
-            "big_bill_collection",
-            metadata={"hnsw:space": "cosine"}  # keep if you’re using cosine in add/search
-        )
-        return client, coll
-    except Exception as e:
-        # surface a clear message to Streamlit
-        raise RuntimeError(
-            "Vector store initialization failed (Chroma). "
-            "Make sure runtime.txt pins Python 3.11 and chromadb==0.5.5. "
-            f"Original error: {e}"
-        )
-
-
-def add_to_vectorstore(coll, embeddings, chunks: List[Dict[str, Any]]):
-    ids = [c["id"] for c in chunks]
-    texts = [c["text"] for c in chunks]
-    metas = [c["metadata"] for c in chunks]
-    vecs = embeddings.embed_documents(texts)
-    coll.add(ids=ids, embeddings=vecs, metadatas=metas, documents=texts)
-
-def retrieve(coll, embeddings, query: str, k: int = 6) -> List[Dict[str, Any]]:
-    # Vector recall
-    q_emb = embeddings.embed_query(query)
-    res = coll.query(query_embeddings=[q_emb], n_results=max(k, 10))
-    docs = [
-        {"text": d, "metadata": m} for d, m in zip(res["documents"][0], res["metadatas"][0])
-    ]
-    # Lightweight lexical rerank (BM25) to reduce hallucination
-    bm25 = BM25Okapi([d["text"].split() for d in docs])
-    scores = bm25.get_scores(query.split())
-    reranked = [d for _, d in sorted(zip(scores, docs), key=lambda x: x[0], reverse=True)]
-    return reranked[:k]
-
 def format_context(docs: List[Dict[str, Any]]) -> str:
-    out = []
-    for i, d in enumerate(docs, 1):
+    blocks = []
+    for d in docs:
         meta = d.get("metadata", {})
-        title = meta.get("doc_title", "Unknown")
-        page = meta.get("page", "?")
-        sec = meta.get("section", "?")
-        out.append(f"[{i}] ({title}, p.{page} §{sec})\n{d['text']}\n")
-    return "\n".join(out)
+        page = meta.get("page", "")
+        sec = meta.get("section", "")
+        head = f"{meta.get('doc_title','')}"
+        if page or sec: head += f" (p.{page} {sec})"
+        blocks.append(f"[{head}]\n{d['text']}")
+    return "\n\n---\n\n".join(blocks)
+
+def get_llm():
+    # your existing OpenAI chat model factory (left as-is)
+    from langchain_openai import ChatOpenAI
+    return ChatOpenAI(model=os.getenv("MODEL_CHOICE", "gpt-4o-mini"), temperature=0.2)
