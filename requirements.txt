@@ -2,21 +2,22 @@
 streamlit>=1.32.0
 python-dotenv>=1.0.0
 
-# RAG core
-langchain>=0.2.11
-langchain-openai>=0.1.17
+# LangChain stack (versions must match)
+langchain==0.3.27
+langchain-community==0.3.27
+langchain-openai==0.3.29
 openai>=1.30.0
 
-# Vector DB (Chroma)
-chromadb==0.5.5
-
+# Vector backends
 faiss-cpu>=1.7.4
+# Install Chroma only off-Linux (i.e., for your local dev) to avoid sqlite on Cloud
+chromadb==0.5.5; platform_system != "Linux"
 
 # Retrieval helpers
 rank-bm25>=0.2.2
 tiktoken>=0.7.0
 
-# Ingestion (no unstructured)
+# Ingestion
 pdfplumber>=0.11.0
 beautifulsoup4>=4.12.3
 lxml>=5.2.2
@@ -25,13 +26,3 @@ requests>=2.32.3
 # Google Sheets logging
 gspread>=6.0.0
 google-auth>=2.30.0
-
-# SQLite shim for Streamlit Cloud (Linux only)
-pysqlite3-binary>=0.5.3; platform_system == "Linux"
-
-langchain==0.2.11
-langchain-community==0.2.11
-langchain-openai==0.1.17
-faiss-cpu>=1.7.4
-# ...keep the rest of your current requirements...
-
