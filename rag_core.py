@@ -55,10 +55,39 @@ def chunk_text(text: str, doc_title: str, source_path: str) -> List[Dict[str, An
 
     return out
 
+# def init_chroma(persist_dir: str = "./chroma_db"):
+#     client = chromadb.Client(Settings(persist_directory=persist_dir, is_persistent=True))
+#     coll = client.get_or_create_collection("big_bill_collection", metadata={"hnsw:space": "cosine"})
+#     return client, coll
+
+# --- SQLite shim for Chroma on Streamlit Cloud (safe to keep everywhere) ---
+try:
+    import pysqlite3  # installed on Linux/Cloud only (requirements has a platform marker)
+    import sys
+    sys.modules["sqlite3"] = sys.modules.pop("pysqlite3")
+except Exception:
+    pass
+
+# ⬇️ Replace your old init_chroma with this:
 def init_chroma(persist_dir: str = "./chroma_db"):
-    client = chromadb.Client(Settings(persist_directory=persist_dir, is_persistent=True))
-    coll = client.get_or_create_collection("big_bill_collection", metadata={"hnsw:space": "cosine"})
-    return client, coll
+    try:
+        import chromadb
+        # Use the modern API to avoid the '_type' error
+        # Chroma 0.5.x: PersistentClient handles the sqlite/duckdb config internally
+        client = chromadb.PersistentClient(path=persist_dir)  # or persist_directory=...
+        coll = client.get_or_create_collection(
+            "big_bill_collection",
+            metadata={"hnsw:space": "cosine"}  # keep if you’re using cosine in add/search
+        )
+        return client, coll
+    except Exception as e:
+        # surface a clear message to Streamlit
+        raise RuntimeError(
+            "Vector store initialization failed (Chroma). "
+            "Make sure runtime.txt pins Python 3.11 and chromadb==0.5.5. "
+            f"Original error: {e}"
+        )
+
 
 def add_to_vectorstore(coll, embeddings, chunks: List[Dict[str, Any]]):
     ids = [c["id"] for c in chunks]
