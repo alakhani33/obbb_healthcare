@@ -18,6 +18,8 @@ from rag_core import init_chroma, get_embeddings, get_llm, retrieve, format_cont
 from prompts import SYSTEM_PROMPT, USER_PROMPT
 from forces_tracker import FORCES_CA, render_forces_tracker
 
+st.caption(f"Vector backend: {'FAISS' if os.getenv('VECTOR_BACKEND','faiss').lower()=='faiss' else 'Chroma'}")
+
 # ---------------------------
 # Google Sheets (no pandas)
 # ---------------------------
