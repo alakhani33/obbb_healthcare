@@ -28,3 +28,10 @@ google-auth>=2.30.0
 
 # SQLite shim for Streamlit Cloud (Linux only)
 pysqlite3-binary>=0.5.3; platform_system == "Linux"
+
+langchain==0.2.11
+langchain-community==0.2.11
+langchain-openai==0.1.17
+faiss-cpu>=1.7.4
+# ...keep the rest of your current requirements...
+

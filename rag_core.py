@@ -3,14 +3,23 @@ import os
 from typing import List, Dict, Any
 from uuid import uuid4
 
-# Decide vector backend from env.
-# Default to FAISS (cloud-friendly). Set VECTOR_BACKEND=chroma to use Chroma locally.
-USE_FAISS = os.getenv("VECTOR_BACKEND", "faiss").lower() == "faiss"
-
 # Shared deps
 from langchain_openai import OpenAIEmbeddings, ChatOpenAI
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from rank_bm25 import BM25Okapi
+
+
+# Decide vector backend from env.
+# Default to FAISS (cloud-friendly). Set VECTOR_BACKEND=chroma to use Chroma locally.
+USE_FAISS = os.getenv("VECTOR_BACKEND", "faiss").lower() == "faiss"
+
+if USE_FAISS:
+    try:
+        from langchain_community.vectorstores import FAISS  # modern path
+    except ImportError:
+        from langchain.vectorstores import FAISS           # legacy path
+
+
 
 
 # -----------------------------
