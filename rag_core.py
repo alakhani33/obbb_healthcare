@@ -1,26 +1,42 @@
 # rag_core.py
 import os
 from typing import List, Dict, Any
+from uuid import uuid4
 
-# --- Backend selector ---
-USE_FAISS = os.getenv("VECTOR_BACKEND", "chroma").lower() == "faiss"
+# Decide vector backend from env.
+# Default to FAISS (cloud-friendly). Set VECTOR_BACKEND=chroma to use Chroma locally.
+USE_FAISS = os.getenv("VECTOR_BACKEND", "faiss").lower() == "faiss"
 
-# Common: embeddings factory (LangChain OpenAI)
-from langchain_openai import OpenAIEmbeddings
+# Shared deps
+from langchain_openai import OpenAIEmbeddings, ChatOpenAI
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from rank_bm25 import BM25Okapi
 
+
+# -----------------------------
+# Embeddings & LLM factories
+# -----------------------------
 def get_embeddings():
     return OpenAIEmbeddings(model=os.getenv("EMBEDDING_MODEL", "text-embedding-3-large"))
 
+
+def get_llm():
+    return ChatOpenAI(
+        model=os.getenv("MODEL_CHOICE", "gpt-4o-mini"),
+        temperature=float(os.getenv("TEMPERATURE", "0.2")),
+    )
+
+
 # -----------------------------
-# FAISS backend (Cloud-friendly)
+# FAISS backend (default)
 # -----------------------------
 if USE_FAISS:
     from langchain_community.vectorstores import FAISS
 
     _faiss_store: FAISS | None = None
 
-    def init_chroma(persist_dir: str = "./chroma_db"):
-        # Keep signature for the app; FAISS doesn't need a client/collection
+    def init_chroma(_persist_dir: str = "./chroma_db"):
+        """Keep signature compatibility; FAISS doesn't need a client/collection."""
         return None, None
 
     def add_to_vectorstore(_coll, _embeddings, chunks: List[Dict[str, Any]]):
@@ -28,34 +44,50 @@ if USE_FAISS:
         global _faiss_store
         texts = [c["text"] for c in chunks]
         metas = [c["metadata"] for c in chunks]
-        embeddings = get_embeddings()
+        embs = get_embeddings()
         if _faiss_store is None:
-            _faiss_store = FAISS.from_texts(texts=texts, embedding=embeddings, metadatas=metas)
+            _faiss_store = FAISS.from_texts(texts=texts, embedding=embs, metadatas=metas)
         else:
-            _faiss_store.add_texts(texts=texts, metadatas=metas, embedding=embeddings)
+            _faiss_store.add_texts(texts=texts, metadatas=metas, embedding=embs)
 
-    def retrieve(_coll, _embeddings, query: str, k: int = 6):
+    def _bm25_rerank(query: str, docs: List[Dict[str, Any]], top_k: int) -> List[Dict[str, Any]]:
+        """Optional lexical re-rank for sharper relevance."""
+        if not docs:
+            return docs
+        corpus = [d["text"] for d in docs]
+        bm25 = BM25Okapi([t.split() for t in corpus])
+        scores = bm25.get_scores(query.split())
+        order = sorted(range(len(scores)), key=lambda i: scores[i], reverse=True)[:top_k]
+        return [docs[i] for i in order]
+
+    def retrieve(_coll, _embeddings, query: str, k: int = 6) -> List[Dict[str, Any]]:
+        """Vector search (FAISS) + light BM25 re-rank."""
         if _faiss_store is None:
             return []
-        docs = _faiss_store.similarity_search(query, k=k)
-        return [{"text": d.page_content, "metadata": d.metadata} for d in docs]
+        # Vector search
+        lc_docs = _faiss_store.similarity_search(query, k=k * 2)  # overfetch a bit
+        docs = [{"text": d.page_content, "metadata": d.metadata} for d in lc_docs]
+        # Lexical re-rank to tighten results
+        docs = _bm25_rerank(query, docs, top_k=k)
+        return docs
 
 # -----------------------------
 # Chroma backend (local dev)
 # -----------------------------
 else:
-    # SQLite shim for Cloud/Linux if present; harmless elsewhere
+    # Optional SQLite shim (harmless if not present). Helps on some Linux hosts.
     try:
-        import pysqlite3  # installed only on Linux (requirements has a platform marker)
+        import pysqlite3  # installed only on Linux if present in requirements
         import sys
         sys.modules["sqlite3"] = sys.modules.pop("pysqlite3")
     except Exception:
         pass
 
+    # Import Chroma lazily (so Cloud builds using FAISS never touch it)
     import chromadb
 
     def init_chroma(persist_dir: str = "./chroma_db"):
-        # Use 0.5.x PersistentClient API to avoid _type issues with Settings
+        """Initialize Chroma 0.5.x using PersistentClient to avoid _type/Settings issues."""
         try:
             client = chromadb.PersistentClient(path=persist_dir)
             coll = client.get_or_create_collection(
@@ -66,36 +98,47 @@ else:
         except Exception as e:
             raise RuntimeError(
                 "Vector store initialization failed (Chroma). "
-                "Make sure runtime.txt pins Python 3.11 and chromadb==0.5.5. "
+                "Ensure runtime.txt pins Python 3.11 and chromadb==0.5.5. "
                 f"Original error: {e}"
             )
 
     def add_to_vectorstore(coll, _embeddings, chunks: List[Dict[str, Any]]):
         ids = [c["id"] for c in chunks]
-        texts = [c["text"] for c in chunks]
-        metadatas = [c["metadata"] for c in chunks]
-        coll.add(ids=ids, documents=texts, metadatas=metadatas)
+        docs = [c["text"] for c in chunks]
+        metas = [c["metadata"] for c in chunks]
+        coll.add(ids=ids, documents=docs, metadatas=metas)
 
-    def retrieve(coll, embeddings, query: str, k: int = 6):
-        # Simple similarity search
-        res = coll.query(query_texts=[query], n_results=k, include=["metadatas", "documents"])
-        docs = []
+    def _bm25_rerank(query: str, docs: List[Dict[str, Any]], top_k: int) -> List[Dict[str, Any]]:
+        if not docs:
+            return docs
+        corpus = [d["text"] for d in docs]
+        bm25 = BM25Okapi([t.split() for t in corpus])
+        scores = bm25.get_scores(query.split())
+        order = sorted(range(len(scores)), key=lambda i: scores[i], reverse=True)[:top_k]
+        return [docs[i] for i in order]
+
+    def retrieve(coll, _embeddings, query: str, k: int = 6) -> List[Dict[str, Any]]:
+        """Chroma similarity + BM25 re-rank."""
+        res = coll.query(query_texts=[query], n_results=k * 2, include=["metadatas", "documents"])
+        docs: List[Dict[str, Any]] = []
         if res and res.get("documents"):
             for text, meta in zip(res["documents"][0], res["metadatas"][0]):
                 docs.append({"text": text, "metadata": meta})
-        return docs
+        return _bm25_rerank(query, docs, top_k=k)
+
 
 # -----------------------------
-# Your existing helpers
+# Chunking & formatting helpers
 # -----------------------------
-from langchain.text_splitter import RecursiveCharacterTextSplitter
-from rank_bm25 import BM25Okapi
-
 def chunk_text(text: str, doc_title: str, source_path: str) -> List[Dict[str, Any]]:
-    splitter = RecursiveCharacterTextSplitter(chunk_size=1200, chunk_overlap=150)
+    """Split long text into overlapping chunks and attach metadata + unique IDs."""
+    splitter = RecursiveCharacterTextSplitter(
+        chunk_size=int(os.getenv("CHUNK_SIZE", "1200")),
+        chunk_overlap=int(os.getenv("CHUNK_OVERLAP", "150")),
+        separators=["\n\n", "\n", " ", ""],
+    )
     chunks = splitter.split_text(text)
-    out = []
-    from uuid import uuid4
+    out: List[Dict[str, Any]] = []
     for i, c in enumerate(chunks):
         out.append({
             "id": f"{doc_title}-{i}-{uuid4().hex}",
@@ -104,18 +147,16 @@ def chunk_text(text: str, doc_title: str, source_path: str) -> List[Dict[str, An
         })
     return out
 
+
 def format_context(docs: List[Dict[str, Any]]) -> str:
+    """Turn retrieved docs into a readable context block for prompting."""
     blocks = []
     for d in docs:
         meta = d.get("metadata", {})
         page = meta.get("page", "")
         sec = meta.get("section", "")
         head = f"{meta.get('doc_title','')}"
-        if page or sec: head += f" (p.{page} {sec})"
+        if page or sec:
+            head += f" (p.{page} {sec})"
         blocks.append(f"[{head}]\n{d['text']}")
     return "\n\n---\n\n".join(blocks)
-
-def get_llm():
-    # your existing OpenAI chat model factory (left as-is)
-    from langchain_openai import ChatOpenAI
-    return ChatOpenAI(model=os.getenv("MODEL_CHOICE", "gpt-4o-mini"), temperature=0.2)
